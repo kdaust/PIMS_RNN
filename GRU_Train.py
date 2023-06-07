@@ -39,6 +39,13 @@ class SequenceDataset(Dataset):
   def __len__(self):
     return len(self.data)
   
+  
+def var_loss(pred, target):
+  vpred = torch.var(pred, dim = 1)
+  vtarg = torch.var(target, dim = 1)
+  res = torch.mean(torch.abs(vpred-vtarg))
+  return res
+
 ## train function
 def train(train_loader, learn_rate, pred_window, batch_size = 32, hidden_dim=256, EPOCHS=10):
     device = torch.device("cuda:0")
@@ -72,7 +79,7 @@ def train(train_loader, learn_rate, pred_window, batch_size = 32, hidden_dim=256
             model.zero_grad()
             
             out, h = model(x.to(device).float(), h)
-            loss = criterion(out, target.to(device).float())
+            loss = criterion(out, target.to(device).float()) + 10 * var_loss(out, target.to(device).float())
             loss.backward()
             optimizer.step()
             avg_loss += loss.item()
@@ -103,7 +110,7 @@ BATCHSIZE = 32
 results = dict()
 
 ##iterate through all decompositions, train model, save, and make prediction
-for ceedman in range(5):
+for ceedman in range(2):
   print("Training model on component",ceedman)
   dat = covs.copy()
   dat['Wind'] = wind[:,ceedman]
@@ -136,7 +143,9 @@ for ceedman in range(5):
 #   if(i > 14):
 #     break
 #   
-# data = next(iter(trainloader))
+#data = next(iter(testload))
+#data3 = data[1]
+
 # x = data[0]
 # target = data[1]
 # input_dim = next(iter(trainloader))[0].shape[2]
