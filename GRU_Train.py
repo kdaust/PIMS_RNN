@@ -47,7 +47,7 @@ def var_loss(pred, target):
   return res
 
 ## train function
-def train(train_loader, learn_rate, pred_window, batch_size = 32, hidden_dim=256, EPOCHS=10):
+def train(train_loader, learn_rate, pred_window, batch_size = 32, hidden_dim=256, EPOCHS=10, w_var = 5):
     device = torch.device("cuda:0")
     # Setting common hyperparameters
     input_dim = next(iter(train_loader))[0].shape[2]
@@ -79,7 +79,7 @@ def train(train_loader, learn_rate, pred_window, batch_size = 32, hidden_dim=256
             model.zero_grad()
             
             out, h = model(x.to(device).float(), h)
-            loss = criterion(out, target.to(device).float()) + 10 * var_loss(out, target.to(device).float())
+            loss = criterion(out, target.to(device).float()) + w_var * var_loss(out, target.to(device).float())
             loss.backward()
             optimizer.step()
             avg_loss += loss.item()
@@ -108,14 +108,15 @@ covs = r.df
 wind = r.wind_data
 BATCHSIZE = 32
 results = dict()
+var_weight = [10,8,6,1,0.1,0]
 
 ##iterate through all decompositions, train model, save, and make prediction
-for ceedman in range(2):
+for ceedman in range(5):
   print("Training model on component",ceedman)
   dat = covs.copy()
   dat['Wind'] = wind[:,ceedman]
   trainload, testload = prep_data(dat, 144, 12, BATCHSIZE)
-  trained_model = train(train_loader=trainload, learn_rate = 0.0001, pred_window = 12, batch_size = BATCHSIZE, hidden_dim=256, EPOCHS=25)
+  trained_model = train(train_loader=trainload, learn_rate = 0.0001, pred_window = 12, batch_size = BATCHSIZE, hidden_dim=256, EPOCHS=25, w_var = var_weight[ceedman])
   mod_name = "GRU_Mod_C" + str(ceedman)
   torch.save(trained_model,mod_name)
   

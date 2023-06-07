@@ -16,10 +16,12 @@ date <- date[!is.na(wind_ts)]
 time <- time[!is.na(wind_ts)]
 wind_ts <- wind_ts[!is.na(wind_ts)]
 out <- ceemdan(wind_ts, num_imfs = 6, noise_strength = 0.1)
+out[,6] <- (out[,6]-mean(out[,6]))/sd(out[,6])
+plot(out[,6])
 
-wind_data <- out[,1:5]
+wind_data <- out
 plot(rowSums(wind_data), type = "l")
-colnames(wind_data) <- paste0("Wind_",1:5) ##wind_data now ready for python
+colnames(wind_data) <- paste0("Wind_",1:6) ##wind_data now ready for python
 
 df <- data.table(Date = date, Time = time)
 df[, Hour := Time %% 24]
@@ -33,10 +35,10 @@ all_res <- py$results
 
 bnum <- 1
 pred <- rbind(all_res$`0`$preds[bnum,],all_res$`1`$preds[bnum,],all_res$`2`$preds[bnum,],
-              all_res$`3`$preds[bnum,],all_res$`4`$preds[bnum,])
+              all_res$`3`$preds[bnum,],all_res$`4`$preds[bnum,],all_res$`5`$preds[bnum,])
 
 gt <- rbind(all_res$`0`$truth[bnum,],all_res$`1`$truth[bnum,],all_res$`2`$truth[bnum,],
-            all_res$`3`$truth[bnum,],all_res$`4`$truth[bnum,])
+            all_res$`3`$truth[bnum,],all_res$`4`$truth[bnum,],all_res$`5`$truth[bnum,])
 gt_sum <- colSums(gt)
 pred_sum <- colSums(pred)
 
