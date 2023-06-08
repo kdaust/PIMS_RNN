@@ -94,7 +94,7 @@ def train(train_loader, learn_rate, pred_window, batch_size = 32, hidden_dim=256
   
 def prep_data(df: pd.DataFrame, lookback: int, pred_window: int, batch_size: int):
   data_raw = generate_sequences(df, lookback, pred_window, "Wind")
-  split = 0.8 # Train/Test Split ratio
+  split = 0.99 # Train/Test Split ratio
   dataset = SequenceDataset(data_raw)
   train_len = int(len(dataset)*split)
   lens = [train_len, len(dataset)-train_len]
@@ -106,17 +106,17 @@ def prep_data(df: pd.DataFrame, lookback: int, pred_window: int, batch_size: int
 ###################################################
 covs = r.df
 wind = r.wind_data
-BATCHSIZE = 32
+BATCHSIZE = 64
 results = dict()
-var_weight = [10,8,6,1,0.1,0]
+var_weight = [3,3,2,2,1,0]
 
 ##iterate through all decompositions, train model, save, and make prediction
-for ceedman in range(5):
+for ceedman in range(6):
   print("Training model on component",ceedman)
   dat = covs.copy()
   dat['Wind'] = wind[:,ceedman]
-  trainload, testload = prep_data(dat, 144, 12, BATCHSIZE)
-  trained_model = train(train_loader=trainload, learn_rate = 0.0001, pred_window = 12, batch_size = BATCHSIZE, hidden_dim=256, EPOCHS=25, w_var = var_weight[ceedman])
+  trainload, testload = prep_data(dat, 168, 12, BATCHSIZE)
+  trained_model = train(train_loader=trainload, learn_rate = 0.0001, pred_window = 12, batch_size = BATCHSIZE, hidden_dim=256, EPOCHS=100, w_var = var_weight[ceedman])
   mod_name = "GRU_Mod_C" + str(ceedman)
   torch.save(trained_model,mod_name)
   
@@ -129,7 +129,26 @@ for ceedman in range(5):
   temp = {'preds': pred_dat, 'truth': ground_truth}
   results[ceedman] = temp
 
+torch.save(test_dat[0], "TestData_Input.pt")
+torch.save(test_dat[1], "TestData_GroundTruth.pt")
 
+##code for loading and prediciting from models
+## load data
+
+
+for nm in range(6):
+  mod_name = "GRU_Mod_C" + str(nm)
+  mod = torch.load(mod_name)
+  dat = covs.copy()
+  dat['Wind'] = wind[:,nm]
+  trainload, testload = prep_data(dat, 168, 24, BATCHSIZE)
+  test_dat = next(iter(testload))
+  h = mod.init_hidden(BATCHSIZE)
+  pred = mod(test_dat[0].to("cuda:0").float(), h)
+  pred_dat = pred[0].cpu().detach().numpy()
+  ground_truth = test_dat[1].numpy()
+  temp = {'preds': pred_dat, 'truth': ground_truth}
+  results[nm] = temp
 ###Prediction
 
 
