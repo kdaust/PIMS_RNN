@@ -1,0 +1,303 @@
+---
+title: "RNN_Cleaned"
+author: "Kiri Daust"
+date: "2023-07-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(ncdf4)
+library(reticulate)
+library(Rlibeemd)
+library(ggplot2)
+```
+
+
+```{r}
+wind_dat <- fread("Test_Data/Ardenville AGCM_test.csv")
+plot(wind_dat$ws, type = "l")
+#wind_dat[,Wind := (ws-mean(ws))/var(ws)]
+df <- wind_dat[,.(month,day,hour,ws)]
+
+df1 <- fread("Test_Data/Ardenville AGCM_temp_test.csv")
+df_temp <- df1[,.(month,day,hour,temp)]
+
+df1 <- fread("Test_Data/Blood Tribe Ag. Project IMCIN_test.csv")
+df2 <- fread("Test_Data/Brocket AGDM_test.csv")
+df3 <- fread("Test_Data/Fort Macleod AGCM_test.csv")
+df4 <- fread("Test_Data/Raymond IMCIN_test.csv")
+
+df[,`:=`(ws_bt = df1$ws,
+         ws_ba = df2$ws,
+         ws_fm = df3$ws,
+         ws_ri = df4$ws)]
+df_all <- merge(df, df_temp, by = c("month","day","hour"), all = F)
+
+out <- ceemdan(df_all$ws, num_imfs = 6, noise_strength = 0.1)
+
+mnvr <- data.table()
+for(i in 1:6){
+  mn <- mean(out[,i])
+  vr <- var(out[,i])
+  out[,i] <- (out[,i]-mn)/vr
+  temp <- data.table(Group = i, Mean = mn, Var = vr)
+  mnvr <- rbind(mnvr,temp)
+}
+
+decomp <- as.data.table(out)
+decomp <- decomp[1:500,]
+setnames(decomp, paste0("C",0:5))
+decomp[,Time := 1:500]
+decomp <- melt(decomp, id.vars = "Time")
+
+ggplot(decomp, aes(x = Time, y = value)) +
+  geom_line() +
+  facet_wrap(~variable, ncol = 1, scales = "free_y") +
+  ylab("Standardised Wind Speed")
+```
+
+```{r}
+df_all[,ws := NULL]
+df_all_std <- df_all[,lapply(.SD, FUN = function(x) return((x-mean(x))/var(x))), 
+                     .SDcols = c("ws_bt","ws_ba","ws_fm","ws_ri","temp")]
+df_final <- cbind(df_all[,.(month,day,hour)], df_all_std)
+
+wind_dat <- fread("../Ardenville AGCM.csv")
+plot(wind_dat$ws, type = "l")
+#wind_dat[,Wind := (ws-mean(ws))/var(ws)]
+df <- wind_dat[,.(month,day,hour,ws)]
+
+df1 <- fread("../Temp/Ardenville AGCM_temp.csv")
+df_temp <- df1[,.(month,day,hour,temp)]
+
+df1 <- fread("../Blood Tribe Ag. Project IMCIN.csv")
+df2 <- fread("../Brocket AGDM.csv")
+df3 <- fread("../Fort Macleod AGCM.csv")
+df4 <- fread("../Raymond IMCIN.csv")
+
+df[,`:=`(ws_bt = df1$ws,
+         ws_ba = df2$ws,
+         ws_fm = df3$ws,
+         ws_ri = df4$ws)]
+df_all <- merge(df, df_temp, by = c("month","day","hour"), all = F)
+
+out <- ceemdan(df_all$ws, num_imfs = 6, noise_strength = 0.1)
+mnvr <- data.table()
+for(i in 1:6){
+  mn <- mean(out[,i])
+  vr <- var(out[,i])
+  out[,i] <- (out[,i]-mn)/vr
+  temp <- data.table(Group = i, Mean = mn, Var = vr)
+  mnvr <- rbind(mnvr,temp)
+}
+plot(out[,6])
+
+wind_data <- out
+plot(rowSums(wind_data), type = "l")
+colnames(wind_data) <- paste0("Wind_",1:6) ##wind_data now ready for python
+
+df_all[,ws := NULL]
+df_all_std <- df_all[,lapply(.SD, FUN = function(x) return((x-mean(x))/var(x))), 
+                     .SDcols = c("ws_bt","ws_ba","ws_fm","ws_ri","temp")]
+df_final <- cbind(df_all[,.(month,day,hour)], df_all_std)
+fwrite(df_final,"Decomp_Data/Covariates_final.csv")
+fwrite(wind_data,"Decomp_Data/Wind_final.csv")
+fwrite(mnvr, "Decomp_Data/MeanVar.csv")
+```
+
+## Now the python
+
+Setting up the GRUNet and various functions
+
+```{python}
+import torch
+from torch.utils.data import Dataset
+import numpy as np
+import pandas as pd
+import torch.nn as nn
+import pickle
+
+class GRUNet(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, n_layers, drop_prob=0.2):
+        super(GRUNet, self).__init__()
+        self.hidden_dim = hidden_dim
+        self.n_layers = n_layers
+        
+        self.gru = nn.GRU(input_dim, hidden_dim, n_layers, batch_first=True, dropout=drop_prob)
+        self.fc = nn.Linear(hidden_dim, output_dim)
+        self.relu = nn.ReLU()
+        
+    def forward(self, x, h):
+        out, h = self.gru(x, h)
+        out = self.fc(self.relu(out[:,-1]))
+        ##print(out.shape)
+        return out, h
+    
+    def init_hidden(self, batch_size):
+        weight = next(self.parameters()).data
+        hidden = weight.new(self.n_layers, batch_size, self.hidden_dim).zero_().to("cuda")
+        return hidden
+
+##function to split into sequences
+def generate_sequences(df: pd.DataFrame, tw: int, pw: int, target_columns, drop_targets=False):
+  '''
+  df: Pandas DataFrame of the univariate time-series
+  tw: Training Window - Integer defining how many steps to look back
+  pw: Prediction Window - Integer defining how many steps forward to predict
+
+  returns: dictionary of sequences and targets for all sequences
+  '''
+  data = dict() # Store results into a dictionary
+  L = len(df)
+  for i in range(L-tw-pw):
+    # Option to drop target from dataframe
+    if drop_targets:
+      df.drop(target_columns, axis=1, inplace=True)
+
+    # Get current sequence  
+    sequence = df[i:i+tw].values
+    # Get values right after the current sequence
+    target = df[i+tw:i+tw+pw][target_columns].values
+    data[i] = {'sequence': sequence, 'target': target}
+  return data
+
+##dataloader class
+class SequenceDataset(Dataset):
+
+  def __init__(self, df):
+    self.data = df
+
+  def __getitem__(self, idx):
+    sample = self.data[idx]
+    return torch.from_numpy(sample['sequence']), torch.from_numpy(sample['target'])
+  
+  def __len__(self):
+    return len(self.data)
+  
+  
+def var_loss(pred, target):
+  vpred = torch.var(pred, dim = 1)
+  vtarg = torch.var(target, dim = 1)
+  res = torch.mean(torch.abs(vpred-vtarg))
+  return res
+
+## train function
+def train(train_loader, learn_rate, pred_window, batch_size = 32, hidden_dim=256, EPOCHS=10, w_var = 5):
+    device = torch.device("cuda:0")
+    # Setting common hyperparameters
+    input_dim = next(iter(train_loader))[0].shape[2]
+    output_dim = pred_window
+    n_layers = 3
+    # Instantiating the models
+    model = GRUNet(input_dim, hidden_dim, output_dim, n_layers)
+
+    model.to(device)
+    
+    # Defining loss function and optimizer
+    criterion = nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=learn_rate)
+    
+    model.train()
+    print("Starting Training of {} model".format("GRU"))
+    epoch_times = []
+    
+    # Start training loop
+    for epoch in range(1,EPOCHS+1):
+        h = model.init_hidden(batch_size)
+        #print("H:", h.shape)
+        avg_loss = 0.
+        counter = 0
+        for x, target in train_loader:
+            #print(".")
+            counter += 1
+            h = h.data
+            model.zero_grad()
+            
+            out, h = model(x.to(device).float(), h)
+            loss = criterion(out, target.to(device).float()) + w_var * var_loss(out, target.to(device).float())
+            loss.backward()
+            optimizer.step()
+            avg_loss += loss.item()
+            if counter%200 == 0:
+                print("Epoch {}......Step: {}/{}....... Average Loss for Epoch: {}".format(epoch, counter, len(train_loader), avg_loss/counter), flush = True)
+        #current_time = time.clock()
+        print("Epoch {}/{} Done, Total Loss: {}".format(epoch, EPOCHS, avg_loss/len(train_loader)),flush = True)
+        #print("Total Time Elapsed: {} seconds".format(str(current_time-start_time)))
+        #epoch_times.append(current_time-start_time)
+    #print("Total Training Time: {} seconds".format(str(sum(epoch_times))))
+    return model
+  
+def prep_data(df: pd.DataFrame, lookback: int, pred_window: int, batch_size: int):
+  data_raw = generate_sequences(df, lookback, pred_window, "Wind")
+  split = 0.99 # Train/Test Split ratio
+  dataset = SequenceDataset(data_raw)
+  train_len = int(len(dataset)*split)
+  lens = [train_len, len(dataset)-train_len]
+  train_ds, test_ds = torch.utils.data.random_split(dataset, lens)
+  trainloader = torch.utils.data.DataLoader(train_ds, batch_size=batch_size, shuffle = True, drop_last = True)
+  testloader = torch.utils.data.DataLoader(test_ds, batch_size=batch_size, shuffle = False, drop_last = True)
+  return trainloader, testloader
+
+```
+
+## Now do the training
+
+```{python}
+BATCHSIZE = 64
+results = dict()
+var_weight = [0,3,2,2,1,0]
+covs = pd.read_csv("Decomp_Data/Covariates_final.csv")
+wind = pd.read_csv("Decomp_Data/Wind_final.csv").values
+
+for ceedman in range(6):
+  print("Training model on component",ceedman)
+  dat = covs.copy()
+  dat['Wind'] = wind[:,ceedman]
+  trainload, testload = prep_data(dat, 168, 24, BATCHSIZE)
+  trained_model = train(train_loader=trainload, learn_rate = 0.0001, pred_window = 24, batch_size = BATCHSIZE, hidden_dim=256, EPOCHS=100, w_var = var_weight[ceedman])
+  mod_name = "GRU_Mod_C" + str(ceedman)
+  torch.save(trained_model,mod_name)
+  
+  # ##Prediction
+  test_dat = next(iter(testload))
+  h = trained_model.init_hidden(BATCHSIZE)
+  pred = trained_model(test_dat[0].to("cuda:0").float(), h)
+  pred_dat = pred[0].cpu().detach().numpy()
+  ground_truth = test_dat[1].numpy()
+  temp = {'preds': pred_dat, 'truth': ground_truth}
+  results[ceedman] = temp
+
+pickle.dump(results, open("Test_Save.pickle", "wb"))
+print("Done!")
+
+```
+
+## Plot results in R
+
+```{r}
+all_res <- py$results
+bnum <- 4
+#all_res$`5`$preds <- pred
+#all_res$`5`$truth <- gt
+pred <- rbind(all_res$`0`$preds[bnum,],all_res$`1`$preds[bnum,],all_res$`2`$preds[bnum,],
+              all_res$`3`$preds[bnum,],all_res$`4`$preds[bnum,],all_res$`5`$preds[bnum,]) #,all_res$`5`$preds[bnum,]
+
+gt <- rbind(all_res$`0`$truth[bnum,],all_res$`1`$truth[bnum,],all_res$`2`$truth[bnum,],
+            all_res$`3`$truth[bnum,],all_res$`4`$truth[bnum,],all_res$`5`$truth[bnum,])
+
+
+gt_sum <- colSums(gt)
+pred_sum <- colSums(pred)
+
+plot(gt_sum, type = "l", xlab = "Hour", ylab = "Standardised Wind Spd")
+lines(pred_sum, type = "l", col = "red")
+legend("topleft", legend = c("Truth","Pred"), fill = c("black","red"))
+
+par(mfrow = c(2,3), mai = rep(0.3,4))
+for(i in 1:6){
+  plot(gt[i,], type = "l",xlab = "Hour", ylab = "Standardised Wind Spd")
+  lines(pred[i,], type = "l", col = "red")
+}
+```
